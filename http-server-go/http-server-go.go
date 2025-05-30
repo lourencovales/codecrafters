@@ -31,6 +31,7 @@ type Header struct {
 	CType    string
 	CLength  int
 	Encoding string
+	Close    bool
 }
 
 func main() {
@@ -53,47 +54,47 @@ func main() {
 
 func connectionHandler(conn net.Conn) {
 
-	buf := make([]byte, 1024) // creating a buffer to keep data
-	answer := ""
+	defer conn.Close()
 
-	size, err := conn.Read(buf)
-	if err != nil {
-		fmt.Println("Error reading input: ", err.Error())
-		os.Exit(1)
+	for {
+		buf := make([]byte, 1024) // creating a buffer to keep data
+		answer := ""
+
+		size, err := conn.Read(buf)
+		if err != nil {
+			fmt.Println("Error reading input: ", err.Error())
+			return
+		}
+
+		request := &Request{}
+
+		// Here we handle the types of requests
+		request.Message = strings.Split(string(buf[:size]), "\r\n") // separating lines by CRLF
+
+		requestLine := strings.Split(request.Message[0], " ") // isolating the request line
+		request.Method = requestLine[0]                       // this is the request method
+		request.Path = requestLine[1]                         // this is the path of the request
+
+		if request.Method == "GET" {
+			answer = request.getRequest()
+		}
+		if request.Method == "POST" {
+			answer = request.postRequest()
+		}
+		if request.Method != "GET" && request.Method != "POST" {
+			request.Response = 404
+			answer = request.answer()
+		}
+
+		conn.Write([]byte(answer))
+
+		if request.Headers.Close {
+			conn.Close()
+		}
 	}
-
-	request := &Request{}
-
-	// Here we handle the types of requests
-	request.Message = strings.Split(string(buf[:size]), "\r\n") // separating lines by CRLF
-
-	requestLine := strings.Split(request.Message[0], " ") // isolating the request line
-	request.Method = requestLine[0]                       // this is the request method
-	request.Path = requestLine[1]                         // this is the path of the request
-
-	if request.Method == "GET" {
-		answer = request.getRequest()
-	}
-	if request.Method == "POST" {
-		answer = request.postRequest()
-	}
-	if request.Method != "GET" && request.Method != "POST" {
-		request.Response = 404
-		answer = request.answer()
-	}
-
-	conn.Write([]byte(answer))
-	conn.Close()
-
 }
 
 func (request *Request) getRequest() string {
-
-	// Simple case
-	if request.Path == "/" {
-		request.Response = 200
-		return request.answer()
-	}
 
 	// Dealing with files endpoint
 	if strings.HasPrefix(request.Path, "/files/") {
@@ -103,10 +104,9 @@ func (request *Request) getRequest() string {
 			return request.answer()
 		}
 		request.Headers.CType = stream
-		request.Body = string(fileInfo(strings.TrimPrefix(request.Path, "/files/")))
+		request.Body = string(fileInfo(fileName))
 		request.Response = 200
 		request.Headers.CLength = len(request.Body)
-		fmt.Println(request.Headers.CLength)
 		return request.answer()
 	}
 
@@ -117,12 +117,15 @@ func (request *Request) getRequest() string {
 			if strings.HasPrefix(line, "Accept-Encoding:") {
 				if strings.Contains(line, "gzip") {
 					request.Headers.Encoding = "gzip"
+					request.Compress = gzipBody(strings.TrimPrefix(request.Path, "/echo/"))
+					request.Headers.CLength = len(request.Compress)
 				}
 				request.Headers.CType = text
 				request.Response = 200
-				request.Compress = gzipBody(strings.TrimPrefix(request.Path, "/echo/"))
-				request.Headers.CLength = len(request.Compress)
 				return request.answer()
+			}
+			if strings.Contains(line, "Connection: close") {
+				request.Headers.Close = true
 			}
 		}
 
@@ -145,6 +148,17 @@ func (request *Request) getRequest() string {
 				return request.answer()
 			}
 		}
+	}
+
+	// Simple case, no endpoint
+	if request.Path == "/" {
+		for _, line := range request.Message {
+			if strings.Contains(line, "Connection: close") {
+				request.Headers.Close = true
+			}
+		}
+		request.Response = 200
+		return request.answer()
 	}
 
 	// Sanity check
@@ -205,6 +219,9 @@ func (request *Request) answer() string {
 			cLengthField.WriteString(strconv.Itoa(request.Headers.CLength))
 			cLengthField.WriteString("\r\n")
 			answer.WriteString(cLengthField.String())
+		}
+		if request.Headers.Close {
+			answer.WriteString("Connection: close\r\n")
 		}
 		answer.WriteString("\r\n")
 		if request.Body != "" {
