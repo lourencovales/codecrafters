@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,6 +28,10 @@ func main() {
 			echo(command)
 		case strings.HasPrefix(command, "type"):
 			typ(command)
+		case strings.HasPrefix(command, "pwd"):
+			pwd()
+		case strings.HasPrefix(command, "cd"):
+			cd(command)
 		default:
 			eval(command)
 		}
@@ -55,6 +60,26 @@ func typ(command string) {
 	}
 }
 
+func pwd() {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Errorf("Error gettings the working directory: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "%s\n", dir)
+}
+
+func cd(command string) {
+	dir := strings.TrimPrefix(command, "cd ")
+	if dir == "~" {
+		dir = os.Getenv("HOME")
+	}
+	err := os.Chdir(dir)
+	if err != nil {
+		err = fmt.Errorf("cd: %s: No such file or directory", err.(*fs.PathError).Path)
+		fmt.Fprintf(os.Stdout, "%s\n", err)
+	}
+}
+
 func eval(command string) {
 	commandArgs := strings.Split(command, " ")
 	commandName := commandArgs[0]
@@ -75,6 +100,7 @@ func builtIns(command string) bool {
 		"exit",
 		"echo",
 		"type",
+		"pwd",
 	}
 
 	for _, c := range knownComm {
