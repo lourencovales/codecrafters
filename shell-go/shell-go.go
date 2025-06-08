@@ -19,35 +19,24 @@ type Command struct {
 	cmd       string
 	args      []string
 	isEscaped bool
+	isQuoted  bool
 	quoteChar rune
 	answer    string
-	full      string
 }
 
 func main() {
 
 	for {
+		command := &Command{}
+
 		fmt.Fprint(os.Stdout, "$ ")
 
-		// Wait for user input
 		commandNewLine, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil {
 			fmt.Println("Error reading input: %v", err)
 		}
-		commOrig := strings.TrimSuffix(commandNewLine, "\n")
-		comm := strings.SplitAfterN(commOrig, " ", 2)
-
-		command := &Command{}
-
-		command.cmd = comm[0][:len(comm[0])-1]
-		if len(comm) > 1 {
-			command.args = append(command.args, comm[1])
-		}
-		command.full = commOrig
-
-		//if command.builtIns() {
-		//	fmt.Fprintln(os.Stdout, "%s\n", command.answer)
-		//}
+		command.cmd = strings.TrimSuffix(commandNewLine, "\n")
+		command.parseArgs()
 
 		switch command.cmd {
 		case "exit":
@@ -70,29 +59,23 @@ func main() {
 }
 
 func (command *Command) exit() {
-	if command.full == "exit 0" {
+	if command.args[0] == "0" {
 		os.Exit(0)
 	}
 }
 
 func (command *Command) echo() {
-	command.parseQuoteChar()
-	if command.quoteChar != rune(0) {
-		command.echoParseArgs()
-		command.answer = strings.Join(command.args, " ")
-	} else {
-		command.answer = strings.Join(command.args, " ")
-	}
+	command.answer = strings.Join(command.args, " ")
 }
 
 func (command *Command) typ() {
+	command.answer = command.args[0] + ": not found"
+
 	if command.builtIn() {
 		command.answer = fmt.Sprintf("%s is a shell builtin", command.args[0])
 	} else if b, s := command.inPath(); b {
 		command.answer = fmt.Sprintf("%s is %s", command.args[0], s)
 	}
-	command.answer = command.args[0] + ": not found"
-
 }
 
 func (command *Command) pwd() {
@@ -109,21 +92,21 @@ func (command *Command) cd() {
 	}
 	err := os.Chdir(command.args[0])
 	if err != nil {
-		fmt.Errorf("cd: %s: No such file or directory", err.(*fs.PathError).Path)
+		e := fmt.Errorf("cd: %s: No such file or directory", err.(*fs.PathError).Path)
+		command.answer = fmt.Sprint(e.Error())
+		return
 	}
 	command.answer = ""
 }
 
 func (command *Command) eval() {
-	command.parseQuoteChar()
-	if command.quoteChar != rune(0) {
-		command.evalParseArgs()
-	}
-	if b, _ := command.inPath(); b {
-		cm := exec.Command(command.cmd, command.args...)
-		cm.Stdout = os.Stdout
-		cm.Stderr = os.Stderr
-		cm.Run()
+	if command.args != nil {
+		if b, _ := command.inPath(); b {
+			cm := exec.Command(command.cmd, command.args...)
+			cm.Stdout = os.Stdout
+			cm.Stderr = os.Stderr
+			cm.Run()
+		}
 	} else {
 		command.answer = command.cmd + ": command not found"
 	}
@@ -139,7 +122,7 @@ func (command *Command) builtIn() bool {
 	}
 
 	for _, c := range knownComm {
-		if strings.Contains(c, command.args[0]) {
+		if c == command.args[0] {
 			return true
 		}
 	}
@@ -155,8 +138,8 @@ func (command *Command) inPath() (bool, string) {
 			fmt.Errorf("problem with dir")
 		}
 		for _, f := range files {
-			if f.Name() == command.cmd {
-				return true, fmt.Sprintf("%s/%s\n", p, f.Name())
+			if f.Name() == command.cmd || f.Name() == command.args[0] {
+				return true, fmt.Sprintf("%s/%s", p, f.Name())
 			}
 		}
 	}
@@ -164,96 +147,81 @@ func (command *Command) inPath() (bool, string) {
 }
 
 // Thanks to https://github.com/mjl-/tokenize for the inspiration
-func (command *Command) evalParseArgs() {
+func (command *Command) parseArgs() {
 	r := make([]rune, 0)
-	prevQuote := false
-	escape := false
 	result := []string{}
-	for _, c := range command.args[0] {
+	inSingleQuote := false
+	inDoubleQuote := false
 
+	peakForward := func(i int) rune {
+		if len(command.cmd) > i+1 {
+			return rune(command.cmd[i+1])
+		}
+		return rune(0)
+	}
+
+	for i, c := range command.cmd {
 		switch c {
-		case command.quoteChar:
-			if escape {
+		case doubleQuote:
+			if inSingleQuote || command.isEscaped {
 				r = append(r, c)
-				escape = false
-			} else if !prevQuote {
-				prevQuote = true
-			} else if prevQuote {
+				command.isEscaped = false
+				continue
+			}
+
+			inDoubleQuote = !inDoubleQuote
+		case quote:
+			if inDoubleQuote || command.isEscaped {
+				command.isEscaped = false
+				r = append(r, c)
+				continue
+			}
+
+			inSingleQuote = !inSingleQuote
+		case ' ':
+			if command.isEscaped || inDoubleQuote || inSingleQuote {
+				command.isEscaped = false
+				r = append(r, c)
+				continue
+			}
+			if len(r) > 0 {
 				result = append(result, string(r))
 				r = []rune{}
-				prevQuote = false
 			}
-		case ' ':
-			if prevQuote {
+		case escape:
+			if inSingleQuote || command.isEscaped {
 				r = append(r, c)
+				command.isEscaped = false
+				continue
 			}
-		case '\\':
-			if escape {
-				r = append(r, c)
-				escape = false
-			} else {
-				escape = true
+			if inDoubleQuote {
+				specialChars := []rune{'$', doubleQuote, escape}
+				for _, char := range specialChars {
+					if peakForward(i) == char {
+						command.isEscaped = true
+						break
+					}
+				}
+				if !strings.HasPrefix(command.cmd, "echo") {
+					r = append(r, c)
+				}
 			}
+			if !inDoubleQuote && !inSingleQuote {
+				command.isEscaped = true
+			}
+
 		default:
 			r = append(r, c)
-			escape = false
+			command.isEscaped = false
 		}
 	}
 
-	command.args = result
-}
-
-func (command *Command) echoParseArgs() {
-	r := make([]rune, 0)
-	prevQuote := false
-	escape := false
-	result := []string{}
-
-	for _, c := range command.args[0] {
-		switch c {
-		case command.quoteChar:
-			if escape {
-				r = append(r, c)
-			}
-			if prevQuote {
-				result = append(result, string(r))
-				r = []rune{}
-				prevQuote = false
-			} else {
-				prevQuote = true
-			}
-		case ' ':
-			if prevQuote {
-				r = append(r, c)
-			}
-		case '\\':
-			if prevQuote {
-				r = append(r, c)
-				escape = false
-			} else {
-				escape = true
-			}
-		default:
-			r = append(r, c)
-			escape = false
-		}
-		if len(r) != 0 {
-			result = append(result, string(r))
-		}
+	if len(r) > 0 {
+		result = append(result, string(r))
 	}
 
-	command.args = result
-}
-
-func (command *Command) parseQuoteChar() {
-	command.quoteChar = rune(0)
-	for _, c := range command.args[0] {
-		if c == quote {
-			command.quoteChar = quote
-			return
-		} else if c == doubleQuote {
-			command.quoteChar = doubleQuote
-			return
-		}
+	command.cmd = result[0]
+	if len(result) > 1 {
+		command.args = result[1:]
 	}
 }
