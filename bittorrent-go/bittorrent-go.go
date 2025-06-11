@@ -62,6 +62,9 @@ func (decoder *decoder) decodeBencode() (interface{}, error) {
 	if firstChar == 'l' {
 		return decoder.decodeList()
 	}
+	if firstChar == 'd' {
+		return decoder.decodeDict()
+	}
 	return "", fmt.Errorf("unsupported bencode: %d, %c", decoder.pos, firstChar)
 }
 
@@ -132,5 +135,41 @@ func (decoder *decoder) decodeList() ([]interface{}, error) {
 	}
 
 	decoder.pos++
+	return result, nil
+}
+
+func (decoder *decoder) decodeDict() (map[string]interface{}, error) {
+
+	result := make(map[string]interface{})
+	decoder.pos++ // Skip the 'd'
+
+	var lastKey string
+
+	for decoder.pos < len(decoder.args) && decoder.args[decoder.pos] != 'e' {
+		// Keys must be strings
+		keyRaw, err := decoder.decodeString()
+		if err != nil {
+			return nil, fmt.Errorf("invalid dictionary key: %w", err)
+		}
+
+		// Ensure lexicographical key order
+		if lastKey != "" && keyRaw < lastKey {
+			return nil, fmt.Errorf("dictionary keys not in lex order: %q < %q", keyRaw, lastKey)
+		}
+		lastKey = keyRaw
+
+		value, err := decoder.decodeBencode()
+		if err != nil {
+			return nil, fmt.Errorf("invalid dictionary value for key %q: %w", keyRaw, err)
+		}
+
+		result[keyRaw] = value
+	}
+
+	if decoder.pos >= len(decoder.args) || decoder.args[decoder.pos] != 'e' {
+		return nil, fmt.Errorf("unterminated dictionary")
+	}
+
+	decoder.pos++ // Skip the 'e'
 	return result, nil
 }
