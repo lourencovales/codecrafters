@@ -5,160 +5,132 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"unicode"
-	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
-// Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
-var _ = json.Marshal
-
-type Bs struct {
-	command   string
-	args      string
-	firstChar rune
-	lastChar  rune
-	buffer    string
+type decoder struct {
+	command string
+	args    string
+	pos     int
 }
 
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
 
-	// TODO: this logic needs to get out of main
-	bs := &Bs{}
+	// TODO: this logic needs to get out of main, probably
+	decoder := &decoder{}
 
-	bs.command = os.Args[1]
+	decoder.command = os.Args[1]
 
-	if bs.command == "decode" {
+	if decoder.command == "decode" {
 
-		bs.args = os.Args[2]
-		bs.firstChar = rune(bs.args[0])
+		decoder.args = os.Args[2]
+		decoder.pos = 0
 
-		decoded, err := bs.decodeBencode()
+		decoded, err := decoder.decodeBencode()
 		if err != nil {
 			fmt.Println(err)
-			return
+			os.Exit(1)
 		}
 
-		fmt.Println(decoded)
+		marsh, err := json.Marshal(decoded)
+		if err != nil {
+			fmt.Println(fmt.Errorf("error marshalling json"))
+		}
+
+		fmt.Println(string(marsh))
 	} else {
-		fmt.Println("Unknown command: " + bs.command)
+		fmt.Println("Unknown command: " + decoder.command)
 		os.Exit(1)
 	}
 }
 
-func (bs *Bs) decodeBencode() (interface{}, error) {
-	lenStr := len(bs.args)
-	bs.lastChar = rune(bs.args[lenStr-1])
-	if bs.isString() {
-		unmarsh, err := bs.decodeString()
-		if err != nil {
-			return "", fmt.Errorf("error in string processing")
-		}
-		marsh, err := json.Marshal(unmarsh)
-		if err != nil {
-			return "", fmt.Errorf("error marshalling json")
-		}
-		return string(marsh), nil
-	} else if bs.isInterger() {
-		return bs.decodeIntegers()
-	} else if bs.isList() {
-		return bs.decodeList()
-	} else {
-		return "", fmt.Errorf("Only strings are supported at the moment")
+func (decoder *decoder) decodeBencode() (interface{}, error) {
+
+	if decoder.pos >= len(decoder.args) {
+		return nil, fmt.Errorf("unexpected end of input")
 	}
+
+	firstChar := rune(decoder.args[decoder.pos])
+	if unicode.IsDigit(firstChar) {
+		return decoder.decodeString()
+	}
+	if firstChar == 'i' {
+		return decoder.decodeIntegers()
+	}
+	if firstChar == 'l' {
+		return decoder.decodeList()
+	}
+	return "", fmt.Errorf("unsupported bencode: %d, %c", decoder.pos, firstChar)
 }
 
-func (bs *Bs) decodeString() (string, error) {
+func (decoder *decoder) decodeString() (string, error) {
 
 	var firstColonIndex int
 
-	for i := 0; i < len(bs.args); i++ {
-		if bs.args[i] == ':' {
+	for i := decoder.pos; i < len(decoder.args); i++ {
+		if decoder.args[i] == ':' {
 			firstColonIndex = i
 			break
 		}
 	}
 
-	lengthStr := bs.args[:firstColonIndex]
+	lengthStr := decoder.args[decoder.pos:firstColonIndex]
 	length, err := strconv.Atoi(lengthStr)
-	decodedString := bs.args[firstColonIndex+1 : firstColonIndex+1+length]
 	if err != nil {
 		return "", err
 	}
-	if len(bs.buffer) >= length+firstColonIndex+1 {
-		bs.buffer = bs.args[firstColonIndex+length+2:]
-		bs.args = decodedString
-		return bs.args, nil
-	} else {
-		bs.buffer = ""
-	}
+
+	size := firstColonIndex + length + 1
+
+	decodedString := decoder.args[firstColonIndex+1 : size]
+
+	decoder.pos = size
 
 	return decodedString, nil
 }
 
-func (bs *Bs) decodeIntegers() (string, error) {
+func (decoder *decoder) decodeIntegers() (int, error) {
 
-	var firstEIndex int
+	start := decoder.pos + 1
+	end := start
 
-	for i := 0; i < len(bs.args); i++ {
-		if bs.args[i] == 'e' {
-			firstEIndex = i
+	for ; end < len(decoder.args); end++ {
+		if decoder.args[end] == 'e' {
 			break
 		}
 	}
 
-	result := bs.args[1:firstEIndex] // start at 1 since we know we can discard the 1st char
-
-	if len(bs.buffer) >= len(result)+2 { // we need to add two to account for discarded chars
-		bs.buffer = bs.args[firstEIndex+1:]
-	} else {
-		bs.buffer = ""
+	if end >= len(decoder.args) {
+		return 0, fmt.Errorf("malformed integer")
 	}
 
-	return result, nil
-}
+	result := decoder.args[start:end]
 
-func (bs *Bs) decodeList() ([]string, error) {
-
-	bsBuffer := &Bs{}
-	bsBuffer.args = bs.args
-	bsBuffer.firstChar = bs.firstChar
-	result := []string{}
-
-	// TODO: Add error checking
-	bsBuffer.args, _ = strings.CutPrefix(bsBuffer.args, "l")
-	bsBuffer.args, _ = strings.CutSuffix(bsBuffer.args, "e")
-	bsBuffer.buffer = bsBuffer.args
-
-	for bsBuffer.buffer != "" {
-		if bsBuffer.isString() {
-			bsBuffer.decodeString()
-			//			bsBuffer.firstChar = rune(bsBuffer
-			result = append(result, bsBuffer.args)
-		}
-		if bsBuffer.isInterger() {
-			bsBuffer.decodeIntegers()
-			result = append(result, bsBuffer.args)
-		}
-		if bsBuffer.isList() {
-			bsBuffer.decodeList()
-			result = append(result, bsBuffer.args)
-		}
+	intResult, err := strconv.Atoi(result)
+	if err != nil {
+		return 0, err
 	}
 
+	decoder.pos = end + 1
+
+	return intResult, nil
+}
+
+func (decoder *decoder) decodeList() ([]interface{}, error) {
+
+	result := make([]interface{}, 0)
+	decoder.pos++
+
+	for decoder.pos < len(decoder.args) && decoder.args[decoder.pos] != 'e' {
+		r, err := decoder.decodeBencode()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+
+	decoder.pos++
 	return result, nil
-}
-
-func (bs *Bs) isInterger() bool {
-	return bs.firstChar == 'i'
-}
-
-func (bs *Bs) isString() bool {
-	return unicode.IsDigit(bs.firstChar)
-}
-
-func (bs *Bs) isList() bool {
-	return bs.firstChar == 'l'
 }
