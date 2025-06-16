@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"unicode"
@@ -62,7 +67,20 @@ func main() {
 
 		fmt.Println(string(marsh))
 	} else if d.command == "peers" {
-		panic()
+		d.args = []byte(os.Args[2])
+
+		decoded, err := d.peers()
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		marsh, err := json.Marshal(decoded) // answer needs to be in json
+		if err != nil {
+			fmt.Println(fmt.Errorf("error marshalling json"))
+		}
+
+		fmt.Println(string(marsh))
 	} else {
 		fmt.Println("Unknown command: " + d.command)
 		os.Exit(1)
@@ -161,7 +179,116 @@ func (d *decoder) info() (interface{}, error) {
 		subMap["piece length"],
 		hashes,
 	), nil
+}
 
+// The peers function is responsible for interacting with the bittorrent tracker
+// and getting information from it - namely, peers
+func (d *decoder) peers() (interface{}, error) {
+
+	// Hard-coding some variables for now
+	peerId := "thisisa20charsstring"
+	port := 6881
+	uploaded := 0
+	downloaded := 0
+	compact := 1
+
+	// file ingestion
+	file, err := os.ReadFile(string(d.args))
+	if err != nil {
+		return nil, err
+	}
+
+	d.args = file
+
+	decoded, err := d.decodeDict()
+	if err != nil {
+		return nil, err
+	}
+
+	urlAnnounce := decoded["announce"]
+
+	// need to figure out where the info dict is
+	start := bytes.Index(file, []byte("4:info"))
+	if start == -1 {
+		return nil, fmt.Errorf("info dict not found")
+	}
+	start += len("4:info")
+
+	// decode just that data and calculate the hash
+	subDec := &decoder{args: file, pos: start}
+	_, err = subDec.decodeDict()
+	if err != nil {
+		return nil, err
+	}
+	end := subDec.pos
+
+	infoHash := sha1.Sum(file[start:end])
+
+	subMap, ok := decoded["info"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("problem with type assertion of info field")
+	}
+
+	left, ok := subMap["length"]
+	if !ok {
+		return nil, fmt.Errorf("problem with type assertion of length field")
+	}
+
+	// building the query to communicate with the tracker
+	queries := url.Values{}
+	queries.Add("info_hash", string(infoHash[:]))
+	queries.Add("peer_id", peerId)
+	queries.Add("port", strconv.Itoa(port))
+	queries.Add("uploaded", strconv.Itoa(uploaded))
+	queries.Add("downloaded", strconv.Itoa(downloaded))
+	queries.Add("left", strconv.Itoa(left.(int)))
+	queries.Add("compact", strconv.Itoa(compact))
+	query := queries.Encode()
+
+	finalUrl := urlAnnounce.(string) + "?" + query
+
+	// GET request to the tracker with the final query
+	resp, err := http.Get(finalUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	// we parse the answer
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("error getting 200 answer from the tracker")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	respDec := &decoder{args: body}
+	respDeco, err := respDec.decodeDict()
+	if err != nil {
+		return nil, err
+	}
+
+	// bounds checking
+	peersResp := []byte(respDeco["peers"].(string))
+	if len(peersResp)%6 != 0 {
+		return nil, fmt.Errorf("peer data is malformed")
+	}
+
+	// we extract the peer information from the answer
+	var ipList []string
+	for i := 0; i < len(peersResp); i += 6 {
+		ip := net.IPv4(
+			peersResp[i],
+			peersResp[i+1],
+			peersResp[i+2],
+			peersResp[i+3],
+		)
+		port := binary.BigEndian.Uint16(peersResp[i+4 : i+6])
+		ipList = append(ipList, fmt.Sprintf("%s:%d", ip.String(), port))
+	}
+
+	return ipList, nil
 }
 
 // The decodeString function deals with bencoded strings
