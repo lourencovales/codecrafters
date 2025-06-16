@@ -61,13 +61,8 @@ func main() {
 		}
 
 		fmt.Println(string(marsh))
-
-		//s, ok := decoded.(string)
-		//if !ok {
-		//	fmt.Errorf("problem with type assertion")
-		//}
-
-		//fmt.Println(marsh)
+	} else if d.command == "peers" {
+		panic()
 	} else {
 		fmt.Println("Unknown command: " + d.command)
 		os.Exit(1)
@@ -101,6 +96,8 @@ func (d *decoder) decodeBencode() (interface{}, error) {
 	return "", fmt.Errorf("unsupported bencode: %d, %c", d.pos, firstChar)
 }
 
+// The info function serves as a way to leverage the decodeBencode function to
+// extract information from torrent files
 func (d *decoder) info() (interface{}, error) {
 
 	// file ingestion
@@ -127,8 +124,8 @@ func (d *decoder) info() (interface{}, error) {
 	infoHash := sha1.Sum(file[start:end])
 	hashHex := hex.EncodeToString(infoHash[:])
 
-	// for URL and Length params, make use of the already existing functions and
-	// parse the results with a bit of type assertion magic
+	// for URL, Length and Pieces params, make use of the already existing
+	// functions and parse the results with a bit of type assertion magic
 	d.args = file
 
 	decoded, err := d.decodeDict()
@@ -138,14 +135,31 @@ func (d *decoder) info() (interface{}, error) {
 
 	subMap, ok := decoded["info"].(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("problem with type assertion")
+		return nil, fmt.Errorf("problem with type assertion of info field")
+	}
+
+	sPieces, ok := subMap["pieces"].(string)
+	if !ok {
+		return nil, fmt.Errorf("problem with type assertion of pieces field")
+	}
+	pieces := []byte(sPieces)
+
+	var hashes []string
+	for i := 0; i < len(pieces); i += 20 { // assuming 20byte chunks
+		end := i + 20
+		if end > len(pieces) { // bounds checking
+			end = len(pieces)
+		}
+		hashes = append(hashes, hex.EncodeToString(pieces[i:end]))
 	}
 
 	return fmt.Sprintf(
-		"Tracker URL: %s\nLength: %d\n, Info Hash: %s\n",
+		"Tracker URL: %s\nLength: %d\nInfo Hash: %s\nPiece Length: %d\nPieces: %s\n",
 		decoded["announce"],
 		subMap["length"],
 		hashHex,
+		subMap["piece length"],
+		hashes,
 	), nil
 
 }
