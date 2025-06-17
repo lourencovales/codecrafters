@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
@@ -19,9 +20,10 @@ import (
 // The decoder struct is a representation of the data structure that holds the
 // all the information needed through the execution of the program
 type decoder struct {
-	command string
-	args    []byte
-	pos     int
+	command  string
+	args     []byte
+	pos      int
+	peerAddr string
 }
 
 func main() {
@@ -39,6 +41,9 @@ func main() {
 		result, err = d.info()
 	case "peers":
 		result, err = d.peers()
+	case "handshake":
+		d.peerAddr = os.Args[3]
+		result, err = d.handshake()
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
 		os.Exit(1)
@@ -47,6 +52,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	// it's expected that these two commands are printed as string, not JSON
+	if cmd == "handshake" || cmd == "info" {
+		if str, ok := result.(string); ok {
+			fmt.Println(str)
+			return
+		}
 	}
 
 	printJson(result)
@@ -261,6 +274,70 @@ func (d *decoder) peers() (interface{}, error) {
 	return ipList, nil
 }
 
+func (d *decoder) handshake() (interface{}, error) {
+	// ingest the file
+	file, err := os.ReadFile(string(d.args))
+	if err != nil {
+		return nil, err
+	}
+
+	// need to figure out where the info dict is
+	start := bytes.Index(file, []byte("4:info"))
+	if start == -1 {
+		return nil, fmt.Errorf("info dict not found")
+	}
+	start += len("4:info")
+
+	// decode just that data and calculate the hash
+	subDec := &decoder{args: file, pos: start}
+	startPos := subDec.pos
+	_, err = subDec.decodeDict()
+	if err != nil {
+		return nil, err
+	}
+	endPos := subDec.pos
+
+	infoHash := sha1.Sum(file[startPos:endPos])
+
+	// 20 byte random peer id
+	peerID := make([]byte, 20)
+	if _, err := io.ReadFull(rand.Reader, peerID); err != nil {
+		return nil, fmt.Errorf("failed to generate peer id: %w", err)
+	}
+
+	// build the handshake msg
+	handshake := new(bytes.Buffer)
+	handshake.WriteByte(19)
+	handshake.WriteString("BitTorrent protocol")
+	handshake.Write(make([]byte, 8)) // 8 zero bytes
+	handshake.Write(infoHash[:])
+	handshake.Write(peerID)
+
+	// connect to peer and send handshake
+	conn, err := net.Dial("tcp", d.peerAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to peer: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write(handshake.Bytes()); err != nil {
+		return nil, fmt.Errorf("failed to send handshake: %w", err)
+	}
+
+	handshakeResponse := make([]byte, 68) // 68 bytes is the default response
+	if _, err := io.ReadFull(conn, handshakeResponse); err != nil {
+		return nil, fmt.Errorf("failed to read handshake response: %w", err)
+	}
+
+	if handshakeResponse[0] != 19 || string(handshakeResponse[1:20]) != "BitTorrent protocol" {
+		return nil, fmt.Errorf("invalid handshake response")
+	}
+
+	recvPeerID := handshakeResponse[48:68]
+
+	return fmt.Sprintf("Peer ID: %x", recvPeerID), nil
+}
+
 // The decodeString function deals with bencoded strings
 func (d *decoder) decodeString() (string, error) {
 
@@ -395,6 +472,6 @@ func (d *decoder) decodeDict() (map[string]interface{}, error) {
 
 func printJson(v interface{}) error {
 	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
+	encoder.SetIndent("", "")
 	return encoder.Encode(v)
 }
