@@ -25,66 +25,31 @@ type decoder struct {
 }
 
 func main() {
-	// You can use print statements as follows for debugging, they'll be
-	// visible when running tests.
-	fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
+	cmd, arg := os.Args[1], os.Args[2]
+	d := &decoder{command: cmd, args: []byte(arg)}
 
-	// TODO: this logic needs to get out of main, probably
-	d := &decoder{}
+	var result interface{}
+	var err error
 
-	d.command = os.Args[1]
-
-	if d.command == "decode" {
-
-		d.args = []byte(os.Args[2])
+	switch cmd {
+	case "decode":
 		d.pos = 0
-
-		decoded, err := d.decodeBencode()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-
-		marsh, err := json.Marshal(decoded) // answer needs to be in json
-		if err != nil {
-			fmt.Println(fmt.Errorf("error marshalling json"))
-		}
-
-		fmt.Println(string(marsh))
-	} else if d.command == "info" {
-		d.args = []byte(os.Args[2])
-
-		decoded, err := d.info()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-
-		marsh, err := json.Marshal(decoded) // answer needs to be in json
-		if err != nil {
-			fmt.Println(fmt.Errorf("error marshalling json"))
-		}
-
-		fmt.Println(string(marsh))
-	} else if d.command == "peers" {
-		d.args = []byte(os.Args[2])
-
-		decoded, err := d.peers()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-
-		marsh, err := json.Marshal(decoded) // answer needs to be in json
-		if err != nil {
-			fmt.Println(fmt.Errorf("error marshalling json"))
-		}
-
-		fmt.Println(string(marsh))
-	} else {
-		fmt.Println("Unknown command: " + d.command)
+		result, err = d.decodeBencode()
+	case "info":
+		result, err = d.info()
+	case "peers":
+		result, err = d.peers()
+	default:
+		fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
 		os.Exit(1)
 	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	printJson(result)
 }
 
 // The decodeBencode function is the main point of entry for data, where we
@@ -185,12 +150,13 @@ func (d *decoder) info() (interface{}, error) {
 // and getting information from it - namely, peers
 func (d *decoder) peers() (interface{}, error) {
 
-	// Hard-coding some variables for now
-	peerId := "thisisa20charsstring"
-	port := 6881
-	uploaded := 0
-	downloaded := 0
-	compact := 1
+	const (
+		peerId     = "thisisa20charsstring"
+		port       = 6881
+		uploaded   = 0
+		downloaded = 0
+		compact    = 1
+	)
 
 	// file ingestion
 	file, err := os.ReadFile(string(d.args))
@@ -198,14 +164,15 @@ func (d *decoder) peers() (interface{}, error) {
 		return nil, err
 	}
 
-	d.args = file
-
-	decoded, err := d.decodeDict()
+	decoded, err := (&decoder{args: file}).decodeDict()
 	if err != nil {
 		return nil, err
 	}
 
-	urlAnnounce := decoded["announce"]
+	urlAnnounce, ok := decoded["announce"].(string)
+	if !ok {
+		return nil, fmt.Errorf("announce field is not a string")
+	}
 
 	// need to figure out where the info dict is
 	start := bytes.Index(file, []byte("4:info"))
@@ -220,16 +187,15 @@ func (d *decoder) peers() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	end := subDec.pos
 
-	infoHash := sha1.Sum(file[start:end])
+	infoHash := sha1.Sum(file[start:subDec.pos])
 
 	subMap, ok := decoded["info"].(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("problem with type assertion of info field")
 	}
 
-	left, ok := subMap["length"]
+	left, ok := subMap["length"].(int)
 	if !ok {
 		return nil, fmt.Errorf("problem with type assertion of length field")
 	}
@@ -241,21 +207,21 @@ func (d *decoder) peers() (interface{}, error) {
 	queries.Add("port", strconv.Itoa(port))
 	queries.Add("uploaded", strconv.Itoa(uploaded))
 	queries.Add("downloaded", strconv.Itoa(downloaded))
-	queries.Add("left", strconv.Itoa(left.(int)))
+	queries.Add("left", strconv.Itoa(left))
 	queries.Add("compact", strconv.Itoa(compact))
 	query := queries.Encode()
 
-	finalUrl := urlAnnounce.(string) + "?" + query
+	finalUrl := urlAnnounce + "?" + query
 
 	// GET request to the tracker with the final query
 	resp, err := http.Get(finalUrl)
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	// we parse the answer
 	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("error getting 200 answer from the tracker")
 	}
@@ -263,28 +229,32 @@ func (d *decoder) peers() (interface{}, error) {
 		return nil, err
 	}
 
-	respDec := &decoder{args: body}
-	respDeco, err := respDec.decodeDict()
+	respDecoder := &decoder{args: body}
+	response, err := respDecoder.decodeDict()
 	if err != nil {
 		return nil, err
 	}
 
-	// bounds checking
-	peersResp := []byte(respDeco["peers"].(string))
-	if len(peersResp)%6 != 0 {
+	peersResp, ok := response["peers"].(string)
+	if !ok {
+		return nil, fmt.Errorf("problem with type assertion of peers field")
+	}
+
+	peersData := []byte(peersResp)
+	if len(peersData)%6 != 0 { // sanity checking
 		return nil, fmt.Errorf("peer data is malformed")
 	}
 
 	// we extract the peer information from the answer
 	var ipList []string
-	for i := 0; i < len(peersResp); i += 6 {
+	for i := 0; i < len(peersData); i += 6 {
 		ip := net.IPv4(
-			peersResp[i],
-			peersResp[i+1],
-			peersResp[i+2],
-			peersResp[i+3],
+			peersData[i],
+			peersData[i+1],
+			peersData[i+2],
+			peersData[i+3],
 		)
-		port := binary.BigEndian.Uint16(peersResp[i+4 : i+6])
+		port := binary.BigEndian.Uint16(peersData[i+4 : i+6])
 		ipList = append(ipList, fmt.Sprintf("%s:%d", ip.String(), port))
 	}
 
@@ -303,6 +273,9 @@ func (d *decoder) decodeString() (string, error) {
 			firstColonIndex = i
 			break
 		}
+	}
+	if firstColonIndex == 0 || firstColonIndex <= d.pos { // sanity checking
+		return "", fmt.Errorf("problems with string parsing")
 	}
 
 	// the string we want to extract
@@ -348,7 +321,7 @@ func (d *decoder) decodeIntegers() (int, error) {
 	// convert it to int type
 	intResult, err := strconv.Atoi(string(result))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("problem with int parsing: %w", err)
 	}
 
 	// move the pos argument one to the right so that we ignore the last char
@@ -371,6 +344,10 @@ func (d *decoder) decodeList() ([]interface{}, error) {
 			return nil, err
 		}
 		result = append(result, r)
+	}
+
+	if d.pos >= len(d.args) { // sanity checking
+		return nil, fmt.Errorf("list is malformed")
 	}
 
 	// move the pos argument one to the right so that we ignore the last char
@@ -414,4 +391,10 @@ func (d *decoder) decodeDict() (map[string]interface{}, error) {
 
 	d.pos++ // Skip the delimiter
 	return result, nil
+}
+
+func printJson(v interface{}) error {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(v)
 }
