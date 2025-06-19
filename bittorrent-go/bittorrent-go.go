@@ -96,32 +96,18 @@ func (d *decoder) decodeBencode() (interface{}, error) {
 // extract information from torrent files
 func (d *decoder) info() (interface{}, error) {
 
+	// getting the infoHash
+	infoHash, err := d.infoHash()
+	hashHex := hex.EncodeToString(infoHash[:])
+
+	// for URL, Length and Pieces params, make use of the already existing
+	// functions and parse the results with a bit of type assertion magic
+
 	// file ingestion
 	file, err := os.ReadFile(string(d.args))
 	if err != nil {
 		return nil, err
 	}
-
-	// need to figure out where the info dict is
-	start := bytes.Index(file, []byte("4:info"))
-	if start == -1 {
-		return nil, fmt.Errorf("info dict not found")
-	}
-	start += len("4:info")
-
-	// decode just that data and calculate the hash
-	subDec := &decoder{args: file, pos: start}
-	_, err = subDec.decodeDict()
-	if err != nil {
-		return nil, err
-	}
-	end := subDec.pos
-
-	infoHash := sha1.Sum(file[start:end])
-	hashHex := hex.EncodeToString(infoHash[:])
-
-	// for URL, Length and Pieces params, make use of the already existing
-	// functions and parse the results with a bit of type assertion magic
 	d.args = file
 
 	decoded, err := d.decodeDict()
@@ -187,21 +173,10 @@ func (d *decoder) peers() (interface{}, error) {
 		return nil, fmt.Errorf("announce field is not a string")
 	}
 
-	// need to figure out where the info dict is
-	start := bytes.Index(file, []byte("4:info"))
-	if start == -1 {
-		return nil, fmt.Errorf("info dict not found")
-	}
-	start += len("4:info")
-
-	// decode just that data and calculate the hash
-	subDec := &decoder{args: file, pos: start}
-	_, err = subDec.decodeDict()
+	infoHash, err := d.infoHash()
 	if err != nil {
 		return nil, err
 	}
-
-	infoHash := sha1.Sum(file[start:subDec.pos])
 
 	subMap, ok := decoded["info"].(map[string]interface{})
 	if !ok {
@@ -275,33 +250,16 @@ func (d *decoder) peers() (interface{}, error) {
 }
 
 func (d *decoder) handshake() (interface{}, error) {
-	// ingest the file
-	file, err := os.ReadFile(string(d.args))
+
+	// getting the infoHash
+	infoHash, err := d.infoHash()
 	if err != nil {
 		return nil, err
 	}
-
-	// need to figure out where the info dict is
-	start := bytes.Index(file, []byte("4:info"))
-	if start == -1 {
-		return nil, fmt.Errorf("info dict not found")
-	}
-	start += len("4:info")
-
-	// decode just that data and calculate the hash
-	subDec := &decoder{args: file, pos: start}
-	startPos := subDec.pos
-	_, err = subDec.decodeDict()
-	if err != nil {
-		return nil, err
-	}
-	endPos := subDec.pos
-
-	infoHash := sha1.Sum(file[startPos:endPos])
 
 	// 20 byte random peer id
 	peerID := make([]byte, 20)
-	if _, err := io.ReadFull(rand.Reader, peerID); err != nil {
+	if _, err = io.ReadFull(rand.Reader, peerID); err != nil {
 		return nil, fmt.Errorf("failed to generate peer id: %w", err)
 	}
 
@@ -474,4 +432,32 @@ func printJson(v interface{}) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "")
 	return encoder.Encode(v)
+}
+
+func (d *decoder) infoHash() ([20]uint8, error) {
+	var empty [20]uint8
+
+	// ingest the file
+	file, err := os.ReadFile(string(d.args))
+	if err != nil {
+		return empty, err
+	}
+
+	// need to figure out where the info dict is
+	start := bytes.Index(file, []byte("4:info"))
+	if start == -1 {
+		return empty, fmt.Errorf("info dict not found")
+	}
+	start += len("4:info")
+
+	// decode just that data and calculate the hash
+	subDec := &decoder{args: file, pos: start}
+	startPos := subDec.pos
+	_, err = subDec.decodeDict()
+	if err != nil {
+		return empty, err
+	}
+	endPos := subDec.pos
+
+	return sha1.Sum(file[startPos:endPos]), nil
 }
