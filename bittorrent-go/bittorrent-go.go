@@ -19,16 +19,47 @@ import (
 
 // The decoder struct is a representation of the data structure that holds the
 // all the information needed through the execution of the program
+// TODO: change the name
 type decoder struct {
-	command  string
-	args     []byte
-	pos      int
-	peerAddr string
+	command    string
+	args       []byte
+	pos        int
+	peerAddr   string
+	outputFile string
+	pieceIndex int
 }
 
+// The PeerMessage struct is a rpresentation of the BitTorrent peer wire
+// protocol message
+type PeerMessage struct {
+	ID      uint8
+	Payload []byte
+}
+
+// TODO: description
+type TorrentInfo struct {
+	InfoHash    [20]byte
+	PieceLength int
+	PieceHashes [][20]byte
+	TotalLength int
+}
+
+// These constants are useful for implementing the BT peer wire protocol
+const (
+	MsgChoke         = 0
+	MsgUnchoke       = 1
+	MsgInterested    = 2
+	MsgNotInterested = 3
+	MsgHave          = 4
+	MsgBitfield      = 5
+	MsgRequest       = 6
+	MsgPiece         = 7
+	MsgCancel        = 8
+)
+
 func main() {
-	cmd, arg := os.Args[1], os.Args[2]
-	d := &decoder{command: cmd, args: []byte(arg)}
+	cmd := os.Args[1]
+	d := &decoder{command: cmd}
 
 	var result interface{}
 	var err error
@@ -36,14 +67,23 @@ func main() {
 	switch cmd {
 	case "decode":
 		d.pos = 0
+		d.args = []byte(os.Args[2])
 		result, err = d.decodeBencode()
 	case "info":
+		d.args = []byte(os.Args[2])
 		result, err = d.info()
 	case "peers":
+		d.args = []byte(os.Args[2])
 		result, err = d.peers()
 	case "handshake":
+		d.args = []byte(os.Args[2])
 		d.peerAddr = os.Args[3]
 		result, err = d.handshake()
+	case "download_file":
+		d.outputFile = os.Args[3]
+		d.args = os.Args[4]
+		d.pieceIndex = os.Args[5]
+		result, err = d.download()
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
 		os.Exit(1)
@@ -55,7 +95,7 @@ func main() {
 	}
 
 	// it's expected that these two commands are printed as string, not JSON
-	if cmd == "handshake" || cmd == "info" {
+	if cmd == "handshake" || cmd == "info" || cmd == "download_file" {
 		if str, ok := result.(string); ok {
 			fmt.Println(str)
 			return
@@ -294,6 +334,104 @@ func (d *decoder) handshake() (interface{}, error) {
 	recvPeerID := handshakeResponse[48:68]
 
 	return fmt.Sprintf("Peer ID: %x", recvPeerID), nil
+}
+
+func (d *decoder) download() (interface{}, error) {
+	torrentInfo, err := d.getTorrentInfo()
+	if err != nil {
+		return nil, fmt.Errorf("problem with torrent parsing: %w", err)
+	}
+
+	peers, err := d.peers()
+	if err != nil {
+		return nil, fmt.Errorf("error getting the peer list: %w", err)
+	}
+
+	peerList, ok := peers.([]string)
+	if !ok || len(peerList) == 0 {
+		return nil, fmt.Errorf("no peers available")
+	}
+
+	for _, peer := range peerList {
+		d.peerAddr = peer
+		pieceData, err := d.downloadFromPeer(torrentInfo, d.pieceIndex)
+		if err != nil {
+			continue
+		}
+
+		expectedHash := torrentInfo.PieceHashes[pieceIndex]
+		actualHash := sha1.Sum(pieceData)
+
+		if !bytes.Equal(expectedHash[:], actualHash[:]) {
+			continue
+		}
+
+		if err := os.WriteFile(d.outputFile, pieceData, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write data to file: %w", err)
+		}
+
+		return fmt.Sprintf("Piece %d downloaded to %s", pieceIndex, d.outputFile), nil
+	}
+
+	return nil, fmt.Errorf("unable to download piece from any peer")
+
+}
+
+func (d *decoder) getTorrentInfo() (*TorrentInfo, error) {
+	file, err := os.ReadFile(string(d.args))
+	if err != nil {
+		return nil, err
+	}
+
+	decoder := &decoder{args: file}
+	decoded, err := decoder.decodeDict()
+	if err != nil {
+		return nil, err
+	}
+
+	infoMap, ok := decoded["info"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid info section")
+	}
+
+	pieceLength, ok := infoMap["piece length"].(int)
+	if !ok {
+		return nil, fmt.Errorf("invalid piece length")
+	}
+
+	totalLength, ok := infoMap["length"].(int)
+	if !ok {
+		return nil, fmt.Errorf("invalid file length")
+	}
+
+	piecesStr, ok := infoMap["pieces"].(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid pieces")
+	}
+
+	pieces := []byte(piecesStr)
+	var pieceHashes [][20]byte
+	for i := 0; i < len(pieces); i += 20 {
+		var hash [20]byte
+		copy(hash[:], pieces[i:i+20])
+		pieceHashes = append(pieceHashes, hash)
+	}
+
+	infoHash, err := d.infoHash()
+	if err != nil {
+		return nil, err
+	}
+
+	return &TorrentInfo{
+		InfoHash:    infoHash,
+		PieceLength: pieceLength,
+		PieceHashes: pieceHashes,
+		TotalLength: totalLength,
+	}, nil
+}
+
+func (d *decoder) downloadFromPeer(tInfo *TorrentInfo, pIndex int) ([]byte, error) {
+	panic()
 }
 
 // The decodeString function deals with bencoded strings
