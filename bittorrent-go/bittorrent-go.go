@@ -57,6 +57,8 @@ const (
 	MsgCancel        = 8
 )
 
+const BlockSize = 16384
+
 func main() {
 	cmd := os.Args[1]
 	d := &decoder{command: cmd}
@@ -81,8 +83,8 @@ func main() {
 		result, err = d.handshake()
 	case "download_file":
 		d.outputFile = os.Args[3]
-		d.args = os.Args[4]
-		d.pieceIndex = os.Args[5]
+		d.args = []byte(os.Args[4])
+		d.pieceIndex, _ = strconv.Atoi(os.Args[5])
 		result, err = d.download()
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
@@ -135,52 +137,39 @@ func (d *decoder) decodeBencode() (interface{}, error) {
 // The info function serves as a way to leverage the decodeBencode function to
 // extract information from torrent files
 func (d *decoder) info() (interface{}, error) {
+	torrentInfo, err := d.getTorrentInfo()
+	if err != nil {
+		return nil, err
+	}
 
-	// getting the infoHash
-	infoHash, err := d.infoHash()
-	hashHex := hex.EncodeToString(infoHash[:])
-
-	// for URL, Length and Pieces params, make use of the already existing
-	// functions and parse the results with a bit of type assertion magic
-
-	// file ingestion
+	// Parse announce URL from torrent file
 	file, err := os.ReadFile(string(d.args))
 	if err != nil {
 		return nil, err
 	}
-	d.args = file
 
-	decoded, err := d.decodeDict()
+	decoded, err := (&decoder{args: file}).decodeDict()
 	if err != nil {
 		return nil, err
 	}
 
-	subMap, ok := decoded["info"].(map[string]interface{})
+	announceURL, ok := decoded["announce"].(string)
 	if !ok {
-		return nil, fmt.Errorf("problem with type assertion of info field")
+		return nil, fmt.Errorf("invalid announce URL")
 	}
 
-	sPieces, ok := subMap["pieces"].(string)
-	if !ok {
-		return nil, fmt.Errorf("problem with type assertion of pieces field")
-	}
-	pieces := []byte(sPieces)
-
+	// Convert piece hashes to hex strings for display
 	var hashes []string
-	for i := 0; i < len(pieces); i += 20 { // assuming 20byte chunks
-		end := i + 20
-		if end > len(pieces) { // bounds checking
-			end = len(pieces)
-		}
-		hashes = append(hashes, hex.EncodeToString(pieces[i:end]))
+	for _, hash := range torrentInfo.PieceHashes {
+		hashes = append(hashes, hex.EncodeToString(hash[:]))
 	}
 
 	return fmt.Sprintf(
 		"Tracker URL: %s\nLength: %d\nInfo Hash: %s\nPiece Length: %d\nPieces: %s\n",
-		decoded["announce"],
-		subMap["length"],
-		hashHex,
-		subMap["piece length"],
+		announceURL,
+		torrentInfo.TotalLength,
+		hex.EncodeToString(torrentInfo.InfoHash[:]),
+		torrentInfo.PieceLength,
 		hashes,
 	), nil
 }
@@ -359,7 +348,7 @@ func (d *decoder) download() (interface{}, error) {
 			continue
 		}
 
-		expectedHash := torrentInfo.PieceHashes[pieceIndex]
+		expectedHash := torrentInfo.PieceHashes[d.pieceIndex]
 		actualHash := sha1.Sum(pieceData)
 
 		if !bytes.Equal(expectedHash[:], actualHash[:]) {
@@ -370,7 +359,7 @@ func (d *decoder) download() (interface{}, error) {
 			return nil, fmt.Errorf("failed to write data to file: %w", err)
 		}
 
-		return fmt.Sprintf("Piece %d downloaded to %s", pieceIndex, d.outputFile), nil
+		return fmt.Sprintf("Piece %d downloaded to %s", d.pieceIndex, d.outputFile), nil
 	}
 
 	return nil, fmt.Errorf("unable to download piece from any peer")
@@ -431,7 +420,196 @@ func (d *decoder) getTorrentInfo() (*TorrentInfo, error) {
 }
 
 func (d *decoder) downloadFromPeer(tInfo *TorrentInfo, pIndex int) ([]byte, error) {
-	panic()
+
+	conn, err := d.connectHandshake(tInfo.InfoHash)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if err := d.sendMessage(conn, &PeerMessage{ID: MsgInterested}); err != nil {
+		return nil, err
+	}
+
+	for {
+		msg, err := d.readMessage(conn)
+		if err != nil {
+			return nil, err
+		}
+
+		if msg.ID == MsgUnchoke {
+			break
+		}
+
+		if msg.ID == MsgBitfield {
+			if !d.hasPiece(msg.Payload, pIndex) {
+				return nil, fmt.Errorf("peer doesn't have piece %d", pIndex)
+			}
+		}
+	}
+
+	pieceSize := tInfo.PieceLength
+	if pIndex == len(tInfo.PieceHashes)-1 {
+		pieceSize = tInfo.TotalLength - (pIndex * tInfo.PieceLength)
+	}
+
+	pieceData := make([]byte, pieceSize)
+	blocksReceived := make(map[int]bool)
+	totalBlocks := (pieceSize + BlockSize - 1) / BlockSize
+
+	for blockIndex := 0; blockIndex < totalBlocks; blockIndex++ {
+		begin := blockIndex * BlockSize
+		length := BlockSize
+		if begin+BlockSize > pieceSize {
+			length = pieceSize - begin
+		}
+
+		requestMsg := &PeerMessage{
+			ID:      MsgRequest,
+			Payload: make([]byte, 12),
+		}
+
+		binary.BigEndian.PutUint32(requestMsg.Payload[0:4], uint32(pIndex))
+		binary.BigEndian.PutUint32(requestMsg.Payload[4:8], uint32(begin))
+		binary.BigEndian.PutUint32(requestMsg.Payload[8:12], uint32(length))
+
+		if err := d.sendMessage(conn, requestMsg); err != nil {
+			return nil, err
+		}
+	}
+
+	for len(blocksReceived) < totalBlocks {
+		msg, err := d.readMessage(conn)
+		if err != nil {
+			return nil, err
+		}
+
+		if msg.ID == MsgPiece {
+			if len(msg.Payload) < 8 {
+				continue
+			}
+
+			msgPieceIndex := binary.BigEndian.Uint32(msg.Payload[0:4])
+			begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+			blockData := msg.Payload[8:]
+
+			if msgPieceIndex != uint32(pIndex) {
+				continue
+			}
+
+			blockIndex := int(begin) / BlockSize
+			if !blocksReceived[blockIndex] {
+				copy(pieceData[begin:], blockData)
+				blocksReceived[blockIndex] = true
+			}
+		}
+	}
+
+	return pieceData, nil
+}
+
+func (d *decoder) connectHandshake(infoHash [20]byte) (net.Conn, error) {
+	conn, err := net.Dial("tcp", d.peerAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = d.performHandshake(conn, infoHash)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func (d *decoder) performHandshake(conn net.Conn, infoHash [20]byte) ([]byte, error) {
+	peerID := make([]byte, 20)
+	if _, err := io.ReadFull(rand.Reader, peerID); err != nil {
+		return nil, fmt.Errorf("failed to generate peer id: %w", err)
+	}
+
+	// Build handshake message
+	handshake := new(bytes.Buffer)
+	handshake.WriteByte(19)
+	handshake.WriteString("BitTorrent protocol")
+	handshake.Write(make([]byte, 8)) // Reserved bytes
+	handshake.Write(infoHash[:])
+	handshake.Write(peerID)
+
+	if _, err := conn.Write(handshake.Bytes()); err != nil {
+		return nil, fmt.Errorf("failed to send handshake: %w", err)
+	}
+
+	response := make([]byte, 68)
+	if _, err := io.ReadFull(conn, response); err != nil {
+		return nil, fmt.Errorf("failed to read handshake response: %w", err)
+	}
+
+	if response[0] != 19 || string(response[1:20]) != "BitTorrent protocol" {
+		return nil, fmt.Errorf("invalid handshake response")
+	}
+
+	return response[48:68], nil
+}
+
+func (d *decoder) sendMessage(conn net.Conn, msg *PeerMessage) error {
+	var buf bytes.Buffer
+
+	msgLen := uint32(1 + len(msg.Payload))
+	if err := binary.Write(&buf, binary.BigEndian, msgLen); err != nil {
+		return err
+	}
+
+	buf.WriteByte(msg.ID)
+
+	buf.Write(msg.Payload)
+
+	_, err := conn.Write(buf.Bytes())
+	return err
+}
+
+// readMessage reads a peer wire protocol message
+func (d *decoder) readMessage(conn net.Conn) (*PeerMessage, error) {
+	// Read message length
+	var msgLen uint32
+	if err := binary.Read(conn, binary.BigEndian, &msgLen); err != nil {
+		return nil, err
+	}
+
+	if msgLen == 0 {
+		// Keep-alive message
+		return &PeerMessage{}, nil
+	}
+
+	// Read message ID
+	var msgID uint8
+	if err := binary.Read(conn, binary.BigEndian, &msgID); err != nil {
+		return nil, err
+	}
+
+	// Read payload
+	payload := make([]byte, msgLen-1)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return nil, err
+	}
+
+	return &PeerMessage{
+		ID:      msgID,
+		Payload: payload,
+	}, nil
+}
+
+// hasPiece checks if peer has a specific piece based on bitfield
+func (d *decoder) hasPiece(bitfield []byte, pieceIndex int) bool {
+	byteIndex := pieceIndex / 8
+	bitIndex := pieceIndex % 8
+
+	if byteIndex >= len(bitfield) {
+		return false
+	}
+
+	return (bitfield[byteIndex] & (1 << (7 - bitIndex))) != 0
 }
 
 // The decodeString function deals with bencoded strings
