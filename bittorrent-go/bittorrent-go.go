@@ -81,11 +81,21 @@ func main() {
 		d.args = []byte(os.Args[2])
 		d.peerAddr = os.Args[3]
 		result, err = d.handshake()
-	case "download_file":
+	case "download_piece":
 		d.outputFile = os.Args[3]
 		d.args = []byte(os.Args[4])
 		d.pieceIndex, _ = strconv.Atoi(os.Args[5])
-		result, err = d.download()
+		result, err = d.downloadPiece()
+	case "download":
+		// Parse command line arguments for download
+		// Expected format: download -o <output_file> <torrent_file>
+		if len(os.Args) < 5 || os.Args[2] != "-o" {
+			fmt.Fprintln(os.Stderr, "Usage: download -o <output_file> <torrent_file>")
+			os.Exit(1)
+		}
+		d.outputFile = os.Args[3]
+		d.args = []byte(os.Args[4])
+		result, err = d.downloadFile()
 	default:
 		fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
 		os.Exit(1)
@@ -96,8 +106,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// it's expected that these two commands are printed as string, not JSON
-	if cmd == "handshake" || cmd == "info" || cmd == "download_file" {
+	// it's expected that these commands are printed as string, not JSON
+	if cmd == "handshake" || cmd == "info" || cmd == "download_piece" || cmd == "download" {
 		if str, ok := result.(string); ok {
 			fmt.Println(str)
 			return
@@ -325,7 +335,7 @@ func (d *decoder) handshake() (interface{}, error) {
 	return fmt.Sprintf("Peer ID: %x", recvPeerID), nil
 }
 
-func (d *decoder) download() (interface{}, error) {
+func (d *decoder) downloadPiece() (interface{}, error) {
 	torrentInfo, err := d.getTorrentInfo()
 	if err != nil {
 		return nil, fmt.Errorf("problem with torrent parsing: %w", err)
@@ -363,7 +373,72 @@ func (d *decoder) download() (interface{}, error) {
 	}
 
 	return nil, fmt.Errorf("unable to download piece from any peer")
+}
 
+// downloadFile downloads the entire file by downloading all pieces
+func (d *decoder) downloadFile() (interface{}, error) {
+	torrentInfo, err := d.getTorrentInfo()
+	if err != nil {
+		return nil, fmt.Errorf("problem with torrent parsing: %w", err)
+	}
+
+	peers, err := d.peers()
+	if err != nil {
+		return nil, fmt.Errorf("error getting the peer list: %w", err)
+	}
+
+	peerList, ok := peers.([]string)
+	if !ok || len(peerList) == 0 {
+		return nil, fmt.Errorf("no peers available")
+	}
+
+	numPieces := len(torrentInfo.PieceHashes)
+	fileData := make([]byte, torrentInfo.TotalLength)
+
+	// Download each piece
+	for pieceIndex := 0; pieceIndex < numPieces; pieceIndex++ {
+		var pieceData []byte
+		var downloadErr error
+
+		// Try each peer until we successfully download the piece
+		for _, peer := range peerList {
+			d.peerAddr = peer
+			pieceData, downloadErr = d.downloadFromPeer(torrentInfo, pieceIndex)
+			if downloadErr != nil {
+				continue // Try next peer
+			}
+
+			// Verify piece integrity
+			expectedHash := torrentInfo.PieceHashes[pieceIndex]
+			actualHash := sha1.Sum(pieceData)
+
+			if bytes.Equal(expectedHash[:], actualHash[:]) {
+				break // Successfully downloaded and verified piece
+			}
+			downloadErr = fmt.Errorf("piece %d hash mismatch", pieceIndex)
+		}
+
+		if downloadErr != nil {
+			return nil, fmt.Errorf("failed to download piece %d: %w", pieceIndex, downloadErr)
+		}
+
+		// Copy piece data to the correct position in the file
+		start := pieceIndex * torrentInfo.PieceLength
+		end := start + len(pieceData)
+		if end > len(fileData) {
+			end = len(fileData)
+		}
+		copy(fileData[start:end], pieceData)
+
+		fmt.Printf("Downloaded piece %d/%d\n", pieceIndex+1, numPieces)
+	}
+
+	// Write the complete file to disk
+	if err := os.WriteFile(d.outputFile, fileData, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write complete file: %w", err)
+	}
+
+	return fmt.Sprintf("Downloaded %s", d.outputFile), nil
 }
 
 func (d *decoder) getTorrentInfo() (*TorrentInfo, error) {
@@ -723,7 +798,7 @@ func (d *decoder) decodeDict() (map[string]interface{}, error) {
 
 		// Ensure lexicographical key order
 		if lastKey != "" && keyRaw < lastKey {
-			return nil, fmt.Errorf("dictionary keys not in lex order: %q < %q", keyRaw, lastKey)
+			fmt.Println(fmt.Errorf("dictionary keys not in lex order: %q < %q", keyRaw, lastKey))
 		}
 		lastKey = keyRaw
 
