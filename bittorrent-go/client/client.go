@@ -1,10 +1,15 @@
 package client
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha1"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"time"
 )
 
 type Client struct {
@@ -63,4 +68,93 @@ func (c *Client) DownloadPiece(outFile string, pieceIndex int) error {
 	}
 
 	return os.WriteFile(outFile, pieceData, 0644)
+}
+
+func (c *Client) downloadPiece(pieceIndex int) ([]byte, error) {
+
+	for _, peerAddr := range c.Peers {
+		pieceData, err := c.tryDl(peerAddr, pieceIndex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to download from peer %s: %v. Trying next peer.\n", peerAddr, err)
+			continue
+		}
+
+		expectedHash := c.TorrentInfo.PieceHashes[pieceIndex]
+		actualHash := sha1.Sum(pieceData)
+		if !bytes.Equal(expectedHash[:], actualHash[:]) {
+			fmt.Fprintf(os.Stderr, "Piece hash mismatch for piece %d from peer %s. Trying next peer.\n", pieceIndex, peerAddr)
+			continue
+		}
+
+		return pieceData, nil
+	}
+
+	return nil, errors.New("failed to download piece from any available peer")
+}
+
+func (c *Client) tryDl(peerAddr string, pieceIndex int) ([]byte, error) {
+
+	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	_, err = peer.PerformHandshake(conn, c.TorrentInfo.InfoHash, c.PeerID)
+	if err != nil {
+		return nil, err
+	}
+
+	bitMsg, err := peer.ReadMsg(conn)
+	if err != nil || bitMsg != peer.MsgBitfield {
+		return nil, errors.New("expected bitfield message")
+	}
+
+	if !peer.HasPiece(bigMsg.Payload, pieceIndex) {
+		return nil, fmt.Errorf("peer does not have piece %d", pieceIndex)
+	}
+
+	if err = peer.SendMsg(conn, peer.MsgInterested, nil); err != nil {
+		return nil, err
+	}
+
+	unchokeMsg, err := peer.ReadMsg(conn)
+	if err != nil || unchokeMsg.ID != peer.MsgUnchoke {
+		return nil, errors.New("unexpected unchoke message")
+	}
+
+	pieceSize := c.TorrentInfo.PieceLength
+	if pieceIndex == len(c.TorrentInfo.PieceHashes)-1 {
+		pieceSize = c.TorrentInfo.TotalLength % c.TorrentInfo.PieceLength
+		if pieceSize == 0 {
+			pieceSize = c.TorrentInfo.PieceLength
+		}
+	}
+
+	pieceData := make([]byte, pieceSize)
+	bytesDownloaded := 0
+	blockSize := 16 * 1024
+
+	for bytesDownloaded < pieceSize {
+		length := blockSize
+		if pieceSize-bytesDownloaded < length {
+			length = pieceSize - bytesDownloaded
+		}
+
+		payload := peer.FormatRequestPayload(uint32(pieceIndex), uint32(bytesDownloaded), uint32(length))
+		if err := peer.SendMsg(conn, peer.MsgRequest, payload); err != nil {
+			return nil, err
+		}
+
+		pieceMsg, err := peer.ReadMsg(conn)
+		if err != nil || pieceMsg.ID != peer.MsgPiece {
+			return nil, errors.New("unexpected piece message")
+		}
+
+		blockData := pieceMsg.Payload[8:]
+		copy(pieceData[bytesDownloaded:], blockData)
+		bytesDownloaded += len(blockData)
+	}
+
+	return pieceData, nil
 }
