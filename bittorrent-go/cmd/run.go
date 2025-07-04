@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/lourencovales/codecrafters/bittorrent-go/bencode"
 	"github.com/lourencovales/codecrafters/bittorrent-go/client"
@@ -48,7 +52,14 @@ func Run(command string, args []string) error {
 		if err != nil {
 			return err
 		}
-		peers, err := tracker.GetPeers(metaInfo)
+
+		var peerID [20]byte
+		if _, err := io.ReadFull(rand.Reader, peerID[:]); err != nil {
+			return fmt.Errorf("failed to generate peer ID: %w", err)
+		}
+		const listenPort uint16 = 6881
+
+		peers, err := tracker.GetPeers(metaInfo, peerID, listenPort)
 		if err != nil {
 			return err
 		}
@@ -63,11 +74,23 @@ func Run(command string, args []string) error {
 		if err != nil {
 			return err
 		}
-		peerID, err := peer.PerformHandshake(peerAddr, metaInfo.InfoHash)
+
+		var peerID [20]byte
+		if _, err := io.ReadFull(rand.Reader, peerID[:]); err != nil {
+			return fmt.Errorf("failed to generate peer ID: %w", err)
+		}
+
+		conn, err := net.DialTimeout("tcp", peerAddr, 3*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to connect to peer: %w", err)
+		}
+		defer conn.Close()
+
+		recvPeerID, err := peer.Handshake(conn, metaInfo.InfoHash, peerID)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Peer ID: %x\n", peerID)
+		fmt.Printf("Peer ID: %x\n", recvPeerID)
 
 	case "download_piece":
 		if len(args) != 4 || args[0] != "-o" {

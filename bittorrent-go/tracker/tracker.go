@@ -15,7 +15,7 @@ import (
 
 func GetPeers(metaInfo *torrent.TorrentInfo, peerID [20]byte, port uint16) ([]string, error) {
 
-	trackerURL, err := buildTrackerURL(metaInfo, peerID, port)
+	trackerURL, err := buildTrackerUrl(metaInfo, peerID, port)
 	if err != nil {
 		return nil, err
 	}

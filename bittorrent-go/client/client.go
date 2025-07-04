@@ -29,14 +29,16 @@ func New(torrFile string) (*Client, error) {
 		return nil, fmt.Errorf("failed to parse torrent file: %w", err)
 	}
 
-	peers, err := tracker.GetPeers(metaInfo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peers from tracker: %w", err)
-	}
-
 	var peerID [20]byte
 	if _, err := io.ReadFull(rand.Reader, peerID[:]); err != nil {
 		return nil, fmt.Errorf("failed to generate peer ID: %w", err)
+	}
+
+	const listenPort uint16 = 6881
+
+	peers, err := tracker.GetPeers(metaInfo, peerID, listenPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get peers from tracker: %w", err)
 	}
 
 	return &Client{
@@ -48,7 +50,7 @@ func New(torrFile string) (*Client, error) {
 
 func (c *Client) DownloadFile(outFile string) error {
 
-	fileData := make([]byte, c.TorrentFile.TotalLength)
+	fileData := make([]byte, c.TorrentInfo.TotalLength)
 	pieceCount := len(c.TorrentInfo.PieceHashes)
 
 	for i := 0; i < pieceCount; i++ {
@@ -66,7 +68,7 @@ func (c *Client) DownloadFile(outFile string) error {
 
 func (c *Client) DownloadPiece(outFile string, pieceIndex int) error {
 
-	pieceData, err := c.downlaodPiece(pieceIndex)
+	pieceData, err := c.downloadPiece(pieceIndex)
 	if err != nil {
 		return err
 	}
@@ -104,17 +106,17 @@ func (c *Client) tryDl(peerAddr string, pieceIndex int) ([]byte, error) {
 	}
 	defer conn.Close()
 
-	_, err = peer.PerformHandshake(conn, c.TorrentInfo.InfoHash, c.PeerID)
+	_, err = peer.Handshake(conn, c.TorrentInfo.InfoHash, c.PeerID)
 	if err != nil {
 		return nil, err
 	}
 
 	bitMsg, err := peer.ReadMsg(conn)
-	if err != nil || bitMsg != peer.MsgBitfield {
+	if err != nil || bitMsg.ID != peer.MsgBitfield {
 		return nil, errors.New("expected bitfield message")
 	}
 
-	if !peer.HasPiece(bigMsg.Payload, pieceIndex) {
+	if !peer.HasPiece(bitMsg.Payload, pieceIndex) {
 		return nil, fmt.Errorf("peer does not have piece %d", pieceIndex)
 	}
 

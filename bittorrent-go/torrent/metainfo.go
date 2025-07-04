@@ -1,4 +1,4 @@
-package metainfo
+package torrent
 
 import (
 	"bytes"
@@ -103,7 +103,7 @@ func hashInfoDict(fileBytes []byte) ([20]byte, error) {
 
 	infoSlice := fileBytes[infoStart+len("4:info"):]
 
-	infoDecoded, err := bencode.Unmarshal(infoStart)
+	infoDecoded, err := bencode.Unmarshal(infoSlice)
 	if err != nil {
 		return [20]byte{}, fmt.Errorf("failed to decode info dict: %w", err)
 	}
