@@ -10,7 +10,7 @@ import (
 func main() {
 
 	if len(os.Args) < 2 { // better to fail fast
-		fmt.Fprintf(os.Stderr, "Error: a command is needed") // TODO
+		fmt.Fprintf(os.Stderr, "Error: a command is needed\n") // TODO
 		os.Exit(1)
 	}
 

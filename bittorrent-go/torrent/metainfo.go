@@ -11,6 +11,7 @@ import (
 	"github.com/lourencovales/codecrafters/bittorrent-go/bencode"
 )
 
+// TorrentInfo holds the metadata parsed from a .torrent file.
 type TorrentInfo struct {
 	AnnounceURL string
 	InfoHash    [20]byte
@@ -19,6 +20,7 @@ type TorrentInfo struct {
 	TotalLength int
 }
 
+// String provides a human-readable summary of the torrent's metadata.
 func (ti *TorrentInfo) String() string {
 
 	var sb strings.Builder
@@ -33,6 +35,7 @@ func (ti *TorrentInfo) String() string {
 	return sb.String()
 }
 
+// ParseFile reads and decodes a .torrent file.
 func ParseFile(filename string) (*TorrentInfo, error) {
 
 	file, err := os.ReadFile(filename)
@@ -94,8 +97,11 @@ func ParseFile(filename string) (*TorrentInfo, error) {
 	}, nil
 }
 
+// hashInfoDictionary locates the raw bencoded 'info' dictionary and computes
+// its SHA1 hash.
 func hashInfoDict(fileBytes []byte) ([20]byte, error) {
 
+	// need to figure out where the info dict is
 	infoStart := bytes.Index(fileBytes, []byte("4:info"))
 	if infoStart == -1 {
 		return [20]byte{}, fmt.Errorf("'info' dict not found")
@@ -116,6 +122,8 @@ func hashInfoDict(fileBytes []byte) ([20]byte, error) {
 	return sha1.Sum(infoBytes), nil
 }
 
+// splitPieceHashes converts the concatenated "pieces" string into a slice of
+// 20-byte hashes.
 func splitPieceHashes(pieces []byte) ([][20]byte, error) {
 
 	if len(pieces)%20 != 0 {

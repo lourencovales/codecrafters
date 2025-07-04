@@ -16,12 +16,16 @@ import (
 	"github.com/lourencovales/codecrafters/bittorrent-go/tracker"
 )
 
+// Client is the struct that holds all the information needed for a single
+// BitTorrent download session.
 type Client struct {
 	TorrentInfo *torrent.TorrentInfo
 	Peers       []string
 	PeerID      [20]byte
 }
 
+// New is the factory function that creates a new Client instance for any given
+// torrent file.
 func New(torrFile string) (*Client, error) {
 
 	metaInfo, err := torrent.ParseFile(torrFile)
@@ -34,7 +38,7 @@ func New(torrFile string) (*Client, error) {
 		return nil, fmt.Errorf("failed to generate peer ID: %w", err)
 	}
 
-	const listenPort uint16 = 6881
+	const listenPort uint16 = 6881 // TODO we might want to make this settable
 
 	peers, err := tracker.GetPeers(metaInfo, peerID, listenPort)
 	if err != nil {
@@ -48,6 +52,7 @@ func New(torrFile string) (*Client, error) {
 	}, nil
 }
 
+// DownloadFile is the function that orchestrates the download of the file
 func (c *Client) DownloadFile(outFile string) error {
 
 	fileData := make([]byte, c.TorrentInfo.TotalLength)
@@ -66,6 +71,9 @@ func (c *Client) DownloadFile(outFile string) error {
 	return os.WriteFile(outFile, fileData, 0644)
 }
 
+// DownloadPiece is the exported function that orchestrates the download of a single
+// piece and saves it to a file. It serves as a shim around the unexported
+// downloadPiece function.
 func (c *Client) DownloadPiece(outFile string, pieceIndex int) error {
 
 	pieceData, err := c.downloadPiece(pieceIndex)
@@ -76,6 +84,8 @@ func (c *Client) DownloadPiece(outFile string, pieceIndex int) error {
 	return os.WriteFile(outFile, pieceData, 0644)
 }
 
+// downloadPiece is an unexported function that contains the core logic for
+// downloading a single piece by running through the list of available peers
 func (c *Client) downloadPiece(pieceIndex int) ([]byte, error) {
 
 	for _, peerAddr := range c.Peers {
@@ -98,6 +108,8 @@ func (c *Client) downloadPiece(pieceIndex int) ([]byte, error) {
 	return nil, errors.New("failed to download piece from any available peer")
 }
 
+// tryDL is an unexported function that contains the logic for downloading a
+// piece from a single peer
 func (c *Client) tryDl(peerAddr string, pieceIndex int) ([]byte, error) {
 
 	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)

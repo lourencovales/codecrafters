@@ -18,6 +18,9 @@ import (
 	"github.com/lourencovales/codecrafters/bittorrent-go/tracker"
 )
 
+// The Run function is main point of entry for the CLI. It uses a switch
+// statement to match the command to the first argument, and if no match is
+// found it will fail and exit the software.
 func Run(command string, args []string) error {
 
 	switch command {
@@ -131,6 +134,9 @@ func Run(command string, args []string) error {
 	return nil
 }
 
+// printJson is just a helper to format some output into JSON. It's unexported
+// since it's only used for this package.
+// TODO this is a remnant from the codecrafters challenge, need to revisit later
 func printJson(v interface{}) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", " ")

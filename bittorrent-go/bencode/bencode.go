@@ -8,11 +8,18 @@ import (
 	"unicode"
 )
 
+// decoder is the data structure that will hold the data and position of the
+// reader throughout the package
 type decoder struct {
 	data []byte
 	pos  int
 }
 
+// Unmarshal is the entry point for the bencode package, it accepts bencoded
+// data and returns it as a Go interface. It's the exported counterpart of the
+// decode function.
+// TODO the interface{} part is also a remnant of the codecrafters challenge,
+// might want to revisit this as it complicates things with type assertions
 func Unmarshal(data []byte) (interface{}, error) {
 
 	if len(data) == 0 {
@@ -22,6 +29,8 @@ func Unmarshal(data []byte) (interface{}, error) {
 	return d.decode()
 }
 
+// decode is the unexported function that matches the bencoded data with its
+// type and dispatches it accordingly
 func (d *decoder) decode() (interface{}, error) {
 
 	if d.pos >= len(d.data) {
@@ -43,14 +52,20 @@ func (d *decoder) decode() (interface{}, error) {
 	}
 }
 
+// decodeString function deals with bencoded strings
 func (d *decoder) decodeString() (string, error) {
+
+	// we detect and save where the first colon is, as this is the delimiter
+	// for bencoded strings
 	colonIndex := bytes.IndexByte(d.data[d.pos:], ':')
 	if colonIndex == -1 {
 		return "", fmt.Errorf("bencode: invalid string format, missing colon")
 	}
 	colonIndex += d.pos
 
+	// the string we want to extract
 	lengthStr := string(d.data[d.pos:colonIndex])
+	// this is to extract the integer that codifies the string
 	length, err := strconv.Atoi(lengthStr)
 	if err != nil {
 		return "", fmt.Errorf("bencode: invalid string length '%s'", lengthStr)
@@ -62,17 +77,19 @@ func (d *decoder) decodeString() (string, error) {
 		return "", fmt.Errorf("bencode: string length exceeds data boundary")
 	}
 
+	// the pos argument is updated with the full size of the string
 	d.pos = end
 	return string(d.data[start:end]), nil
 }
 
+// decodeInt function deals with bencoded integers
 func (d *decoder) decodeInt() (int, error) {
-	d.pos++ // Skip 'i'
-	endIndex := bytes.IndexByte(d.data[d.pos:], 'e')
+	d.pos++                                          // Skip 'i'
+	endIndex := bytes.IndexByte(d.data[d.pos:], 'e') // find the delimiter
 	if endIndex == -1 {
 		return 0, fmt.Errorf("bencode: invalid integer format, missing 'e'")
 	}
-	endIndex += d.pos
+	endIndex += d.pos // the integer is between the start and end parameters
 
 	intStr := string(d.data[d.pos:endIndex])
 	val, err := strconv.Atoi(intStr)
@@ -80,13 +97,17 @@ func (d *decoder) decodeInt() (int, error) {
 		return 0, fmt.Errorf("bencode: invalid integer value '%s'", intStr)
 	}
 
+	// move the pos argument one to the right so that we ignore the last char
 	d.pos = endIndex + 1
 	return val, nil
 }
 
+// decodeList function deals with bencoded lists
 func (d *decoder) decodeList() ([]interface{}, error) {
 	d.pos++ // Skip 'l'
 	var list []interface{}
+
+	// while not out of bounds and we haven't found the char, keep going
 	for d.pos < len(d.data) && d.data[d.pos] != 'e' {
 		val, err := d.decode()
 		if err != nil {
@@ -103,14 +124,28 @@ func (d *decoder) decodeList() ([]interface{}, error) {
 	return list, nil
 }
 
+// decodeDict function deals with bencoded dictionaries
 func (d *decoder) decodeDict() (map[string]interface{}, error) {
 	d.pos++ // Skip 'd'
 	dict := make(map[string]interface{})
+
+	// var lastKey string // not needed if we're not checking for key ordering
+
 	for d.pos < len(d.data) && d.data[d.pos] != 'e' {
 		key, err := d.decodeString()
 		if err != nil {
 			return nil, err
 		}
+
+		// The BitTorrent spec wants us to ensure lexicographical key order, but
+		// this creates more problems than it solves. Need to find a better way
+		// to deal with this
+
+		//if lastKey != "" && keyRaw < lastKey {
+		//	fmt.Println(fmt.Errorf("dictionary keys not in lex order: %q < %q", keyRaw, lastKey))
+		//}
+		//lastKey = keyRaw
+
 		val, err := d.decode()
 		if err != nil {
 			return nil, err
@@ -118,6 +153,7 @@ func (d *decoder) decodeDict() (map[string]interface{}, error) {
 		dict[key] = val
 	}
 
+	// we're out of bounds or we never found the delimiter, so we error out
 	if d.pos >= len(d.data) || d.data[d.pos] != 'e' {
 		return nil, fmt.Errorf("bencode: invalid dictionary format, missing 'e'")
 	}
@@ -126,12 +162,16 @@ func (d *decoder) decodeDict() (map[string]interface{}, error) {
 	return dict, nil
 }
 
+// Marshal converts a Go interface into Bencoded data - this is the exported
+// shim around marshalTo
 func Marshal(v interface{}) ([]byte, error) {
 	var buf bytes.Buffer
 	err := marshalTo(&buf, v)
 	return buf.Bytes(), err
 }
 
+// marshalTo does the heavy lifting of marshaling the data depending on the type
+// assertion match
 func marshalTo(buf *bytes.Buffer, v interface{}) error {
 	switch val := v.(type) {
 	case string:

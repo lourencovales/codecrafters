@@ -13,28 +13,33 @@ import (
 	"github.com/lourencovales/codecrafters/bittorrent-go/torrent"
 )
 
+// GetPeers contacts the tracker and retrieves a list of peers for the torrent.
 func GetPeers(metaInfo *torrent.TorrentInfo, peerID [20]byte, port uint16) ([]string, error) {
 
+	// Build the tracker URL with necessary query parameters
 	trackerURL, err := buildTrackerUrl(metaInfo, peerID, port)
 	if err != nil {
 		return nil, err
 	}
 
+	// GET request to the tracker with the final query
 	resp, err := http.Get(trackerURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to contact tracker: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK { // sanity check
 		return nil, fmt.Errorf("tracker returned non-200 status: %s", resp.Status)
 	}
 
+	// parsing the answer
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read tracker response: %w", err)
 	}
 
+	// and unmarshal the bencoded response
 	trackerResponse, err := bencode.Unmarshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tracker response: %w", err)
@@ -43,6 +48,7 @@ func GetPeers(metaInfo *torrent.TorrentInfo, peerID [20]byte, port uint16) ([]st
 	return parsePeers(trackerResponse)
 }
 
+// buildTrackerURL constructs the full URL to query the tracker.
 func buildTrackerUrl(metaInfo *torrent.TorrentInfo, peerID [20]byte, port uint16) (string, error) {
 
 	base, err := url.Parse(metaInfo.AnnounceURL)
@@ -64,6 +70,7 @@ func buildTrackerUrl(metaInfo *torrent.TorrentInfo, peerID [20]byte, port uint16
 	return base.String(), nil
 }
 
+// parsePeers extracts the peer list from the tracker's Bencoded response.
 func parsePeers(trackerResponse interface{}) ([]string, error) {
 
 	respDict, ok := trackerResponse.(map[string]interface{})
