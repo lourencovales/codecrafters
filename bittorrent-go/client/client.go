@@ -10,6 +10,10 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/lourencovales/codecrafters/bittorrent-go/peer"
+	"github.com/lourencovales/codecrafters/bittorrent-go/torrent"
+	"github.com/lourencovales/codecrafters/bittorrent-go/tracker"
 )
 
 type Client struct {
