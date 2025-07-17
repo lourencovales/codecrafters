@@ -62,7 +62,10 @@ func connectionHandler(conn net.Conn) {
 
 		size, err := conn.Read(buf)
 		if err != nil {
-			fmt.Println("Error reading input: ", err.Error())
+			// Connection closed by client is normal, don't log EOF errors
+			if err.Error() != "EOF" {
+				fmt.Println("Error reading input: ", err.Error())
+			}
 			return
 		}
 
@@ -89,8 +92,12 @@ func connectionHandler(conn net.Conn) {
 		conn.Write([]byte(answer))
 
 		if request.Headers.Close {
-			conn.Close()
+			return
 		}
+		
+		// For HTTP/1.1, close connection after each request by default
+		// This prevents the infinite loop from trying to read from closed connections
+		return
 	}
 }
 
