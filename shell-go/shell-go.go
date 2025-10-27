@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -16,12 +17,15 @@ const (
 )
 
 type Command struct {
-	cmd       string
-	args      []string
-	isEscaped bool
-	isQuoted  bool
-	quoteChar rune
-	answer    string
+	cmd         string
+	args        []string
+	isEscaped   bool
+	isQuoted    bool
+	quoteChar   rune
+	answer      string
+	hasRedir    bool
+	redirPath   string
+	stderrRedir bool
 }
 
 func main() {
@@ -52,9 +56,15 @@ func main() {
 		default:
 			command.eval()
 		}
-		if command.answer != "" {
-			fmt.Printf("%s\n", command.answer)
+		if !command.hasRedir {
+			if command.answer != "" {
+				if !strings.HasSuffix(command.answer, "\n") {
+					command.answer = command.answer + "\n"
+				}
+				fmt.Printf("%s", command.answer)
+			}
 		}
+
 	}
 }
 
@@ -65,7 +75,21 @@ func (command *Command) exit() {
 }
 
 func (command *Command) echo() {
-	command.answer = strings.Join(command.args, " ")
+	output := strings.Join(command.args, " ")
+
+	if command.hasRedir {
+		dir := filepath.Dir(command.redirPath)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			panic(err)
+		}
+
+		if err := os.WriteFile(command.redirPath, []byte(output), 0644); err != nil {
+			panic(err)
+		}
+		return
+	}
+
+	command.answer = output
 }
 
 func (command *Command) typ() {
@@ -73,7 +97,7 @@ func (command *Command) typ() {
 
 	if command.builtIn() {
 		command.answer = fmt.Sprintf("%s is a shell builtin", command.args[0])
-	} else if b, s := command.inPath(); b {
+	} else if b, s := command.inPath(command.args[0]); b {
 		command.answer = fmt.Sprintf("%s is %s", command.args[0], s)
 	}
 }
@@ -100,16 +124,48 @@ func (command *Command) cd() {
 }
 
 func (command *Command) eval() {
-	if command.args != nil {
-		if b, _ := command.inPath(); b {
-			cm := exec.Command(command.cmd, command.args...)
-			cm.Stdout = os.Stdout
-			cm.Stderr = os.Stderr
-			cm.Run()
+	if b, _ := command.inPath(command.cmd); b {
+		cm := exec.Command(command.cmd, command.args...)
+		out, err := cm.Output()
+		if command.hasRedir && len(out) > 0 {
+
+			dir := filepath.Dir(command.redirPath)
+			if errDir := os.MkdirAll(dir, 0750); errDir != nil {
+				panic(errDir)
+			}
+
+			outputFile, errOut := os.Create(command.redirPath)
+			if errOut != nil {
+				panic(errOut)
+			}
+			defer outputFile.Close()
+
+			if _, errWrite := outputFile.Write(out); errWrite != nil {
+				panic(errWrite)
+			}
+
+			if command.stderrRedir {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					command.answer = fmt.Sprint(string(exitErr.Stderr))
+					command.hasRedir = false
+					return
+				}
+			}
 		}
-	} else {
-		command.answer = command.cmd + ": command not found"
+		if err != nil && !command.stderrRedir {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				command.answer = fmt.Sprint(string(exitErr.Stderr))
+				command.hasRedir = false
+				return
+			}
+			panic(err)
+		}
+		command.answer = string(out)
+		return
+
 	}
+
+	command.answer = command.cmd + ": command not found"
 }
 
 func (command *Command) builtIn() bool {
@@ -130,17 +186,16 @@ func (command *Command) builtIn() bool {
 	return false
 }
 
-func (command *Command) inPath() (bool, string) {
+func (command *Command) inPath(name string) (bool, string) {
 	listPath := strings.Split(os.Getenv("PATH"), ":")
 	for _, p := range listPath {
-		files, err := os.ReadDir(p)
+		fullPath := filepath.Join(p, name)
+		info, err := os.Stat(fullPath)
 		if err != nil {
-			fmt.Errorf("problem with dir")
+			continue
 		}
-		for _, f := range files {
-			if f.Name() == command.cmd || f.Name() == command.args[0] {
-				return true, fmt.Sprintf("%s/%s", p, f.Name())
-			}
+		if info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return true, fullPath
 		}
 	}
 	return false, ""
@@ -209,7 +264,18 @@ func (command *Command) parseArgs() {
 			if !inDoubleQuote && !inSingleQuote {
 				command.isEscaped = true
 			}
-
+		case '>':
+			command.hasRedir = true
+		case '1':
+			if !(peakForward(i) == '>') {
+				r = append(r, c)
+			}
+		case '2':
+			if !(peakForward(i) == '>') {
+				r = append(r, c)
+			} else {
+				command.stderrRedir = true
+			}
 		default:
 			r = append(r, c)
 			command.isEscaped = false
@@ -220,8 +286,16 @@ func (command *Command) parseArgs() {
 		result = append(result, string(r))
 	}
 
-	command.cmd = result[0]
-	if len(result) > 1 {
-		command.args = result[1:]
+	if !command.hasRedir {
+		command.cmd = result[0]
+		if len(result) > 1 {
+			command.args = result[1:]
+		}
+		return
 	}
+
+	command.cmd = result[0]
+	command.args = result[1 : len(result)-1]
+	command.redirPath = result[len(result)-1]
+
 }
