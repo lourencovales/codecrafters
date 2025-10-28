@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -23,9 +24,10 @@ type Command struct {
 	isQuoted    bool
 	quoteChar   rune
 	answer      string
-	hasRedir    bool
+	stdoutRedir bool
 	redirPath   string
 	stderrRedir bool
+	appendRedir bool
 }
 
 func main() {
@@ -56,7 +58,7 @@ func main() {
 		default:
 			command.eval()
 		}
-		if !command.hasRedir {
+		if !command.stdoutRedir {
 			if command.answer != "" {
 				if !strings.HasSuffix(command.answer, "\n") {
 					command.answer = command.answer + "\n"
@@ -77,16 +79,51 @@ func (command *Command) exit() {
 func (command *Command) echo() {
 	output := strings.Join(command.args, " ")
 
-	if command.hasRedir {
-		dir := filepath.Dir(command.redirPath)
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			panic(err)
-		}
+	dir := filepath.Dir(command.redirPath)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		panic(err)
+	}
 
-		if err := os.WriteFile(command.redirPath, []byte(output), 0644); err != nil {
+	if command.stdoutRedir {
+		if command.appendRedir {
+			fileInfo, err := os.Stat(command.redirPath)
+			needsNewline := err == nil && fileInfo.Size() > 0
+
+			f, errOpen := os.OpenFile(command.redirPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if errOpen != nil {
+				panic(errOpen)
+			}
+
+			if needsNewline {
+				f.Write([]byte("\n"))
+			}
+
+			if _, errWrite := f.Write([]byte(output)); errWrite != nil {
+				panic(errWrite)
+			}
+			if errClose := f.Close(); errClose != nil {
+				panic(errClose)
+			}
+		} else if err := os.WriteFile(command.redirPath, []byte(output), 0644); err != nil {
 			panic(err)
 		}
-		return
+	}
+
+	if command.stderrRedir {
+		if command.appendRedir {
+			f, errOpen := os.OpenFile(command.redirPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if errOpen != nil {
+				panic(errOpen)
+			}
+			if _, errWrite := f.Write([]byte("")); errWrite != nil { // TODO: ugly hack
+				panic(errWrite)
+			}
+			if errClose := f.Close(); errClose != nil {
+				panic(errClose)
+			}
+		} else if errWrite := os.WriteFile(command.redirPath, []byte(""), 0644); errWrite != nil { // TODO: ugly hack
+			panic(errWrite)
+		}
 	}
 
 	command.answer = output
@@ -126,41 +163,78 @@ func (command *Command) cd() {
 func (command *Command) eval() {
 	if b, _ := command.inPath(command.cmd); b {
 		cm := exec.Command(command.cmd, command.args...)
-		out, err := cm.Output()
-		if command.hasRedir && len(out) > 0 {
 
-			dir := filepath.Dir(command.redirPath)
-			if errDir := os.MkdirAll(dir, 0750); errDir != nil {
-				panic(errDir)
+		var stdout, stderr bytes.Buffer
+		cm.Stdout = &stdout
+		cm.Stderr = &stderr
+
+		err := cm.Run()
+
+		dir := filepath.Dir(command.redirPath)
+		if errDir := os.MkdirAll(dir, 0750); errDir != nil {
+			panic(errDir)
+		}
+
+		if command.stdoutRedir {
+			if command.appendRedir {
+				fileInfo, err := os.Stat(command.redirPath)
+				needsNewline := err == nil && fileInfo.Size() > 0
+
+				f, errOpen := os.OpenFile(command.redirPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if errOpen != nil {
+					panic(errOpen)
+				}
+
+				stdoutBytes := bytes.TrimSuffix(stdout.Bytes(), []byte("\n"))
+
+				if needsNewline {
+					f.Write([]byte("\n"))
+				}
+
+				if _, errWrite := f.Write(stdoutBytes); errWrite != nil {
+					panic(errWrite)
+				}
+				if errClose := f.Close(); errClose != nil {
+					panic(errClose)
+				}
+			} else if errWrite := os.WriteFile(command.redirPath, stdout.Bytes(), 0644); errWrite != nil {
+				panic(errWrite)
 			}
+		}
+		if command.stderrRedir {
+			if command.appendRedir {
+				fileInfo, err := os.Stat(command.redirPath)
+				needsNewline := err == nil && fileInfo.Size() > 0
 
-			outputFile, errOut := os.Create(command.redirPath)
-			if errOut != nil {
-				panic(errOut)
-			}
-			defer outputFile.Close()
+				f, errOpen := os.OpenFile(command.redirPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if errOpen != nil {
+					panic(errOpen)
+				}
 
-			if _, errWrite := outputFile.Write(out); errWrite != nil {
+				stderrBytes := bytes.TrimSuffix(stderr.Bytes(), []byte("\n"))
+
+				if needsNewline {
+					f.Write([]byte("\n"))
+				}
+
+				if _, errWrite := f.Write(stderrBytes); errWrite != nil {
+					panic(errWrite)
+				}
+				if errClose := f.Close(); errClose != nil {
+					panic(errClose)
+				}
+			} else if errWrite := os.WriteFile(command.redirPath, stderr.Bytes(), 0644); errWrite != nil {
 				panic(errWrite)
 			}
 
-			if command.stderrRedir {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					command.answer = fmt.Sprint(string(exitErr.Stderr))
-					command.hasRedir = false
-					return
-				}
-			}
 		}
 		if err != nil && !command.stderrRedir {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				command.answer = fmt.Sprint(string(exitErr.Stderr))
-				command.hasRedir = false
-				return
-			}
+			command.answer = stderr.String()
+			command.stdoutRedir = false
+			return
 			panic(err)
 		}
-		command.answer = string(out)
+		command.answer = stdout.String()
 		return
 
 	}
@@ -215,6 +289,13 @@ func (command *Command) parseArgs() {
 		return rune(0)
 	}
 
+	peakBackward := func(i int) rune {
+		if i > 0 {
+			return rune(command.cmd[i-1])
+		}
+		return rune(0)
+	}
+
 	for i, c := range command.cmd {
 		switch c {
 		case doubleQuote:
@@ -265,10 +346,24 @@ func (command *Command) parseArgs() {
 				command.isEscaped = true
 			}
 		case '>':
-			command.hasRedir = true
+			if peakBackward(i) == '1' || peakBackward(i) == '2' {
+				continue
+			} else if peakBackward(i) == ' ' && peakForward(i) == ' ' {
+				command.stdoutRedir = true
+			} else if peakBackward(i) == '>' {
+				command.appendRedir = true
+				continue
+			} else if peakForward(i) == '>' {
+				command.appendRedir = true
+				command.stdoutRedir = true
+			} else {
+				r = append(r, c)
+			}
 		case '1':
 			if !(peakForward(i) == '>') {
 				r = append(r, c)
+			} else {
+				command.stdoutRedir = true
 			}
 		case '2':
 			if !(peakForward(i) == '>') {
@@ -286,7 +381,7 @@ func (command *Command) parseArgs() {
 		result = append(result, string(r))
 	}
 
-	if !command.hasRedir {
+	if !command.stdoutRedir && !command.stderrRedir {
 		command.cmd = result[0]
 		if len(result) > 1 {
 			command.args = result[1:]
